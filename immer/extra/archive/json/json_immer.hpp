@@ -2,6 +2,8 @@
 
 #include <cereal/archives/json.hpp>
 
+#include <boost/hana/functional/id.hpp>
+
 /**
  * Special types of archives, working with JSON, that support providing extra
  * context (ImmerArchives) to serialize immer data structures.
@@ -27,25 +29,36 @@ struct blackhole_output_archive
  * Adapted from cereal/archives/adapters.hpp
  */
 
-template <class Previous, class ImmerArchives>
+template <class Previous, class ImmerArchives, class WrapF = boost::hana::id_t>
 class json_immer_output_archive
     : public cereal::OutputArchive<
-          json_immer_output_archive<Previous, ImmerArchives>>
+          json_immer_output_archive<Previous, ImmerArchives, WrapF>>
     , public cereal::traits::TextArchive
 {
 public:
     template <class... Args>
     explicit json_immer_output_archive(Args&&... args)
-        : cereal::OutputArchive<
-              json_immer_output_archive<Previous, ImmerArchives>>{this}
+        requires std::is_same_v<WrapF, boost::hana::id_t>
+        : cereal::OutputArchive<json_immer_output_archive>{this}
         , previous{std::forward<Args>(args)...}
     {
     }
 
     template <class... Args>
     json_immer_output_archive(ImmerArchives archives, Args&&... args)
-        : cereal::OutputArchive<
-              json_immer_output_archive<Previous, ImmerArchives>>{this}
+        requires std::is_same_v<WrapF, boost::hana::id_t>
+        : cereal::OutputArchive<json_immer_output_archive>{this}
+        , previous{std::forward<Args>(args)...}
+        , archives{std::move(archives)}
+    {
+    }
+
+    template <class... Args>
+    json_immer_output_archive(ImmerArchives archives,
+                              WrapF wrap,
+                              Args&&... args)
+        : cereal::OutputArchive<json_immer_output_archive>{this}
+        , wrap{std::move(wrap)}
         , previous{std::forward<Args>(args)...}
         , archives{std::move(archives)}
     {
@@ -62,7 +75,14 @@ public:
     template <class T>
     void saveValue(const T& value)
     {
-        previous.saveValue(value);
+        auto& wrapped = wrap(value);
+        using Old     = std::decay_t<T>;
+        using New     = std::decay_t<decltype(wrapped)>;
+        if constexpr (std::is_same_v<Old, New>) {
+            previous.saveValue(value);
+        } else {
+            (*this)(wrapped);
+        }
     }
 
     ImmerArchives& get_output_archives() & { return archives; }
@@ -75,22 +95,38 @@ public:
         self(CEREAL_NVP(archives));
     }
 
+    WrapF wrap;
+
 private:
     Previous previous;
     ImmerArchives archives;
 };
 
-template <class Previous, class ImmerArchives>
+template <class Previous, class ImmerArchives, class WrapF = boost::hana::id_t>
 class json_immer_input_archive
     : public cereal::InputArchive<
-          json_immer_input_archive<Previous, ImmerArchives>>
+          json_immer_input_archive<Previous, ImmerArchives, WrapF>>
     , public cereal::traits::TextArchive
 {
+    template <class Container>
+    friend struct archivable_loader_wrapper;
+
 public:
     template <class... Args>
     json_immer_input_archive(ImmerArchives archives_, Args&&... args)
-        : cereal::InputArchive<
-              json_immer_input_archive<Previous, ImmerArchives>>{this}
+        requires std::is_same_v<WrapF, boost::hana::id_t>
+        : cereal::InputArchive<json_immer_input_archive>{this}
+        , previous{std::forward<Args>(args)...}
+        , archives{std::move(archives_)}
+    {
+    }
+
+    template <class... Args>
+    json_immer_input_archive(ImmerArchives archives_,
+                             WrapF wrap_,
+                             Args&&... args)
+        : cereal::InputArchive<json_immer_input_archive>{this}
+        , wrap{std::move(wrap_)}
         , previous{std::forward<Args>(args)...}
         , archives{std::move(archives_)}
     {
@@ -105,11 +141,20 @@ public:
     template <class T>
     void loadValue(T& value)
     {
-        previous.loadValue(value);
+        auto& wrapped = wrap(value);
+        using Old     = std::decay_t<T>;
+        using New     = std::decay_t<decltype(wrapped)>;
+        if constexpr (std::is_same_v<Old, New>) {
+            previous.loadValue(value);
+        } else {
+            (*this)(wrapped);
+        }
     }
 
     ImmerArchives& get_input_archives() { return archives; }
     const ImmerArchives& get_input_archives() const { return archives; }
+
+    WrapF wrap;
 
 private:
     Previous previous;
@@ -122,7 +167,7 @@ private:
  * access to the immer-related archive.
  *
  * template <class Previous ,class ImmerArchives, class T>
- * void load(json_immer_input_archive<Previous, ImmerArchives>& ar,
+ * void load(json_immer_input_archive<Previous, ImmerArchives,WrapF>& ar,
  *           vector_one_archivable<T>& value)
  */
 
@@ -133,15 +178,15 @@ private:
 // ######################################################################
 //! Prologue for NVPs for JSON archives
 /*! NVPs do not start or finish nodes - they just set up the names */
-template <class Previous, class ImmerArchives, class T>
-inline void prologue(json_immer_output_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void prologue(json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::NameValuePair<T> const&)
 {
 }
 
 //! Prologue for NVPs for JSON archives
-template <class Previous, class ImmerArchives, class T>
-inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void prologue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::NameValuePair<T> const&)
 {
 }
@@ -149,16 +194,16 @@ inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
 // ######################################################################
 //! Epilogue for NVPs for JSON archives
 /*! NVPs do not start or finish nodes - they just set up the names */
-template <class Previous, class ImmerArchives, class T>
-inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void epilogue(json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::NameValuePair<T> const&)
 {
 }
 
 //! Epilogue for NVPs for JSON archives
 /*! NVPs do not start or finish nodes - they just set up the names */
-template <class Previous, class ImmerArchives, class T>
-inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void epilogue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::NameValuePair<T> const&)
 {
 }
@@ -166,15 +211,15 @@ inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
 // ######################################################################
 //! Prologue for deferred data for JSON archives
 /*! Do nothing for the defer wrapper */
-template <class Previous, class ImmerArchives, class T>
-inline void prologue(json_immer_output_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void prologue(json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::DeferredData<T> const&)
 {
 }
 
 //! Prologue for deferred data for JSON archives
-template <class Previous, class ImmerArchives, class T>
-inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void prologue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::DeferredData<T> const&)
 {
 }
@@ -182,16 +227,16 @@ inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
 // ######################################################################
 //! Epilogue for deferred for JSON archives
 /*! NVPs do not start or finish nodes - they just set up the names */
-template <class Previous, class ImmerArchives, class T>
-inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void epilogue(json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::DeferredData<T> const&)
 {
 }
 
 //! Epilogue for deferred for JSON archives
 /*! Do nothing for the defer wrapper */
-template <class Previous, class ImmerArchives, class T>
-inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void epilogue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::DeferredData<T> const&)
 {
 }
@@ -200,16 +245,17 @@ inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
 //! Prologue for SizeTags for JSON archives
 /*! SizeTags are strictly ignored for JSON, they just indicate
     that the current node should be made into an array */
-template <class Previous, class ImmerArchives, class T>
-inline void prologue(json_immer_output_archive<Previous, ImmerArchives>& ar,
-                     cereal::SizeTag<T> const&)
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void
+prologue(json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
+         cereal::SizeTag<T> const&)
 {
     ar.makeArray();
 }
 
 //! Prologue for SizeTags for JSON archives
-template <class Previous, class ImmerArchives, class T>
-inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void prologue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::SizeTag<T> const&)
 {
 }
@@ -217,15 +263,15 @@ inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
 // ######################################################################
 //! Epilogue for SizeTags for JSON archives
 /*! SizeTags are strictly ignored for JSON */
-template <class Previous, class ImmerArchives, class T>
-inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void epilogue(json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::SizeTag<T> const&)
 {
 }
 
 //! Epilogue for SizeTags for JSON archives
-template <class Previous, class ImmerArchives, class T>
-inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void epilogue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      cereal::SizeTag<T> const&)
 {
 }
@@ -236,41 +282,46 @@ inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
     that may be given data by the type about to be archived
 
     Minimal types do not start or finish nodes */
-template <class Previous,
-          class ImmerArchives,
-          class T,
-          cereal::traits::EnableIf<
-              !std::is_arithmetic<T>::value,
-              !cereal::traits::has_minimal_base_class_serialization<
-                  T,
-                  cereal::traits::has_minimal_output_serialization,
-                  json_immer_output_archive<Previous, ImmerArchives>>::value,
-              !cereal::traits::has_minimal_output_serialization<
-                  T,
-                  json_immer_output_archive<Previous, ImmerArchives>>::value> =
-              cereal::traits::sfinae>
-inline void prologue(json_immer_output_archive<Previous, ImmerArchives>& ar,
-                     T const&)
+template <
+    class Previous,
+    class ImmerArchives,
+    class WrapF,
+    class T,
+    cereal::traits::EnableIf<
+        !std::is_arithmetic<T>::value,
+        !cereal::traits::has_minimal_base_class_serialization<
+            T,
+            cereal::traits::has_minimal_output_serialization,
+            json_immer_output_archive<Previous, ImmerArchives, WrapF>>::value,
+        !cereal::traits::has_minimal_output_serialization<
+            T,
+            json_immer_output_archive<Previous, ImmerArchives, WrapF>>::value> =
+        cereal::traits::sfinae>
+inline void
+prologue(json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
+         T const&)
 {
     ar.startNode();
 }
 
 //! Prologue for all other types for JSON archives
-template <class Previous,
-          class ImmerArchives,
-          class T,
-          cereal::traits::EnableIf<
-              !std::is_arithmetic<T>::value,
-              !cereal::traits::has_minimal_base_class_serialization<
-                  T,
-                  cereal::traits::has_minimal_input_serialization,
-                  json_immer_input_archive<Previous, ImmerArchives>>::value,
-              !cereal::traits::has_minimal_input_serialization<
-                  T,
-                  json_immer_input_archive<Previous, ImmerArchives>>::value> =
-              cereal::traits::sfinae>
-inline void prologue(json_immer_input_archive<Previous, ImmerArchives>& ar,
-                     T const&)
+template <
+    class Previous,
+    class ImmerArchives,
+    class WrapF,
+    class T,
+    cereal::traits::EnableIf<
+        !std::is_arithmetic<T>::value,
+        !cereal::traits::has_minimal_base_class_serialization<
+            T,
+            cereal::traits::has_minimal_input_serialization,
+            json_immer_input_archive<Previous, ImmerArchives, WrapF>>::value,
+        !cereal::traits::has_minimal_input_serialization<
+            T,
+            json_immer_input_archive<Previous, ImmerArchives, WrapF>>::value> =
+        cereal::traits::sfinae>
+inline void
+prologue(json_immer_input_archive<Previous, ImmerArchives, WrapF>& ar, T const&)
 {
     ar.startNode();
 }
@@ -280,72 +331,78 @@ inline void prologue(json_immer_input_archive<Previous, ImmerArchives>& ar,
 /*! Finishes the node created in the prologue
 
     Minimal types do not start or finish nodes */
-template <class Previous,
-          class ImmerArchives,
-          class T,
-          cereal::traits::EnableIf<
-              !std::is_arithmetic<T>::value,
-              !cereal::traits::has_minimal_base_class_serialization<
-                  T,
-                  cereal::traits::has_minimal_output_serialization,
-                  json_immer_output_archive<Previous, ImmerArchives>>::value,
-              !cereal::traits::has_minimal_output_serialization<
-                  T,
-                  json_immer_output_archive<Previous, ImmerArchives>>::value> =
-              cereal::traits::sfinae>
-inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>& ar,
-                     T const&)
+template <
+    class Previous,
+    class ImmerArchives,
+    class WrapF,
+    class T,
+    cereal::traits::EnableIf<
+        !std::is_arithmetic<T>::value,
+        !cereal::traits::has_minimal_base_class_serialization<
+            T,
+            cereal::traits::has_minimal_output_serialization,
+            json_immer_output_archive<Previous, ImmerArchives, WrapF>>::value,
+        !cereal::traits::has_minimal_output_serialization<
+            T,
+            json_immer_output_archive<Previous, ImmerArchives, WrapF>>::value> =
+        cereal::traits::sfinae>
+inline void
+epilogue(json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
+         T const&)
 {
     ar.finishNode();
 }
 
 //! Epilogue for all other types other for JSON archives
-template <class Previous,
-          class ImmerArchives,
-          class T,
-          cereal::traits::EnableIf<
-              !std::is_arithmetic<T>::value,
-              !cereal::traits::has_minimal_base_class_serialization<
-                  T,
-                  cereal::traits::has_minimal_input_serialization,
-                  json_immer_input_archive<Previous, ImmerArchives>>::value,
-              !cereal::traits::has_minimal_input_serialization<
-                  T,
-                  json_immer_input_archive<Previous, ImmerArchives>>::value> =
-              cereal::traits::sfinae>
-inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>& ar,
-                     T const&)
+template <
+    class Previous,
+    class ImmerArchives,
+    class WrapF,
+    class T,
+    cereal::traits::EnableIf<
+        !std::is_arithmetic<T>::value,
+        !cereal::traits::has_minimal_base_class_serialization<
+            T,
+            cereal::traits::has_minimal_input_serialization,
+            json_immer_input_archive<Previous, ImmerArchives, WrapF>>::value,
+        !cereal::traits::has_minimal_input_serialization<
+            T,
+            json_immer_input_archive<Previous, ImmerArchives, WrapF>>::value> =
+        cereal::traits::sfinae>
+inline void
+epilogue(json_immer_input_archive<Previous, ImmerArchives, WrapF>& ar, T const&)
 {
     ar.finishNode();
 }
 
 // ######################################################################
 //! Prologue for arithmetic types for JSON archives
-template <class Previous, class ImmerArchives>
-inline void prologue(json_immer_output_archive<Previous, ImmerArchives>& ar,
-                     std::nullptr_t const&)
+template <class Previous, class ImmerArchives, class WrapF>
+inline void
+prologue(json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
+         std::nullptr_t const&)
 {
     ar.writeName();
 }
 
 //! Prologue for arithmetic types for JSON archives
-template <class Previous, class ImmerArchives>
-inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF>
+inline void prologue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      std::nullptr_t const&)
 {
 }
 
 // ######################################################################
 //! Epilogue for arithmetic types for JSON archives
-template <class Previous, class ImmerArchives>
-inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF>
+inline void epilogue(json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
                      std::nullptr_t const&)
 {
 }
 
 //! Epilogue for arithmetic types for JSON archives
-template <class Previous, class ImmerArchives>
-inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
+template <class Previous, class ImmerArchives, class WrapF>
+inline void epilogue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      std::nullptr_t const&)
 {
 }
@@ -354,11 +411,13 @@ inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
 //! Prologue for arithmetic types for JSON archives
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class T,
           cereal::traits::EnableIf<std::is_arithmetic<T>::value> =
               cereal::traits::sfinae>
-inline void prologue(json_immer_output_archive<Previous, ImmerArchives>& ar,
-                     T const&)
+inline void
+prologue(json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
+         T const&)
 {
     ar.writeName();
 }
@@ -366,10 +425,11 @@ inline void prologue(json_immer_output_archive<Previous, ImmerArchives>& ar,
 //! Prologue for arithmetic types for JSON archives
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class T,
           cereal::traits::EnableIf<std::is_arithmetic<T>::value> =
               cereal::traits::sfinae>
-inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
+inline void prologue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      T const&)
 {
 }
@@ -378,10 +438,11 @@ inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
 //! Epilogue for arithmetic types for JSON archives
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class T,
           cereal::traits::EnableIf<std::is_arithmetic<T>::value> =
               cereal::traits::sfinae>
-inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>&,
+inline void epilogue(json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
                      T const&)
 {
 }
@@ -389,10 +450,11 @@ inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>&,
 //! Epilogue for arithmetic types for JSON archives
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class T,
           cereal::traits::EnableIf<std::is_arithmetic<T>::value> =
               cereal::traits::sfinae>
-inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
+inline void epilogue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      T const&)
 {
 }
@@ -401,11 +463,13 @@ inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
 //! Prologue for strings for JSON archives
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class CharT,
           class Traits,
           class Alloc>
-inline void prologue(json_immer_output_archive<Previous, ImmerArchives>& ar,
-                     std::basic_string<CharT, Traits, Alloc> const&)
+inline void
+prologue(json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
+         std::basic_string<CharT, Traits, Alloc> const&)
 {
     ar.writeName();
 }
@@ -413,10 +477,11 @@ inline void prologue(json_immer_output_archive<Previous, ImmerArchives>& ar,
 //! Prologue for strings for JSON archives
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class CharT,
           class Traits,
           class Alloc>
-inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
+inline void prologue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      std::basic_string<CharT, Traits, Alloc> const&)
 {
 }
@@ -425,10 +490,11 @@ inline void prologue(json_immer_input_archive<Previous, ImmerArchives>&,
 //! Epilogue for strings for JSON archives
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class CharT,
           class Traits,
           class Alloc>
-inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>&,
+inline void epilogue(json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
                      std::basic_string<CharT, Traits, Alloc> const&)
 {
 }
@@ -436,10 +502,11 @@ inline void epilogue(json_immer_output_archive<Previous, ImmerArchives>&,
 //! Epilogue for strings for JSON archives
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class CharT,
           class Traits,
           class Alloc>
-inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
+inline void epilogue(json_immer_input_archive<Previous, ImmerArchives, WrapF>&,
                      std::basic_string<CharT, Traits, Alloc> const&)
 {
 }
@@ -448,38 +515,39 @@ inline void epilogue(json_immer_input_archive<Previous, ImmerArchives>&,
 // Common JSONArchive serialization functions
 // ######################################################################
 //! Serializing NVP types to JSON
-template <class Previous, class ImmerArchives, class T>
+template <class Previous, class ImmerArchives, class WrapF, class T>
 inline void CEREAL_SAVE_FUNCTION_NAME(
-    json_immer_output_archive<Previous, ImmerArchives>& ar,
+    json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
     cereal::NameValuePair<T> const& t)
 {
     ar.setNextName(t.name);
-    ar(t.value);
+    ar(ar.wrap(t.value));
 }
 
-template <class Previous, class ImmerArchives, class T>
-inline void
-CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive<Previous, ImmerArchives>& ar,
-                          cereal::NameValuePair<T>& t)
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void CEREAL_LOAD_FUNCTION_NAME(
+    json_immer_input_archive<Previous, ImmerArchives, WrapF>& ar,
+    cereal::NameValuePair<T>& t)
 {
     ar.setNextName(t.name);
-    ar(t.value);
+    auto&& wrapped = ar.wrap(t.value);
+    ar(wrapped);
 }
 
 //! Saving for nullptr to JSON
-template <class Previous, class ImmerArchives>
+template <class Previous, class ImmerArchives, class WrapF>
 inline void CEREAL_SAVE_FUNCTION_NAME(
-    json_immer_output_archive<Previous, ImmerArchives>& ar,
+    json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
     std::nullptr_t const& t)
 {
     ar.saveValue(t);
 }
 
 //! Loading arithmetic from JSON
-template <class Previous, class ImmerArchives>
-inline void
-CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive<Previous, ImmerArchives>& ar,
-                          std::nullptr_t& t)
+template <class Previous, class ImmerArchives, class WrapF>
+inline void CEREAL_LOAD_FUNCTION_NAME(
+    json_immer_input_archive<Previous, ImmerArchives, WrapF>& ar,
+    std::nullptr_t& t)
 {
     ar.loadValue(t);
 }
@@ -487,11 +555,12 @@ CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive<Previous, ImmerArchives>& ar,
 //! Saving for arithmetic to JSON
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class T,
           cereal::traits::EnableIf<std::is_arithmetic<T>::value> =
               cereal::traits::sfinae>
 inline void CEREAL_SAVE_FUNCTION_NAME(
-    json_immer_output_archive<Previous, ImmerArchives>& ar, T const& t)
+    json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar, T const& t)
 {
     ar.saveValue(t);
 }
@@ -499,12 +568,12 @@ inline void CEREAL_SAVE_FUNCTION_NAME(
 //! Loading arithmetic from JSON
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class T,
           cereal::traits::EnableIf<std::is_arithmetic<T>::value> =
               cereal::traits::sfinae>
-inline void
-CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive<Previous, ImmerArchives>& ar,
-                          T& t)
+inline void CEREAL_LOAD_FUNCTION_NAME(
+    json_immer_input_archive<Previous, ImmerArchives, WrapF>& ar, T& t)
 {
     ar.loadValue(t);
 }
@@ -512,11 +581,12 @@ CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive<Previous, ImmerArchives>& ar,
 //! saving string to JSON
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class CharT,
           class Traits,
           class Alloc>
 inline void CEREAL_SAVE_FUNCTION_NAME(
-    json_immer_output_archive<Previous, ImmerArchives>& ar,
+    json_immer_output_archive<Previous, ImmerArchives, WrapF>& ar,
     std::basic_string<CharT, Traits, Alloc> const& str)
 {
     ar.saveValue(str);
@@ -525,31 +595,32 @@ inline void CEREAL_SAVE_FUNCTION_NAME(
 //! loading string from JSON
 template <class Previous,
           class ImmerArchives,
+          class WrapF,
           class CharT,
           class Traits,
           class Alloc>
-inline void
-CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive<Previous, ImmerArchives>& ar,
-                          std::basic_string<CharT, Traits, Alloc>& str)
+inline void CEREAL_LOAD_FUNCTION_NAME(
+    json_immer_input_archive<Previous, ImmerArchives, WrapF>& ar,
+    std::basic_string<CharT, Traits, Alloc>& str)
 {
     ar.loadValue(str);
 }
 
 // ######################################################################
 //! Saving SizeTags to JSON
-template <class Previous, class ImmerArchives, class T>
-inline void
-CEREAL_SAVE_FUNCTION_NAME(json_immer_output_archive<Previous, ImmerArchives>&,
-                          cereal::SizeTag<T> const&)
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void CEREAL_SAVE_FUNCTION_NAME(
+    json_immer_output_archive<Previous, ImmerArchives, WrapF>&,
+    cereal::SizeTag<T> const&)
 {
     // nothing to do here, we don't explicitly save the size
 }
 
 //! Loading SizeTags from JSON
-template <class Previous, class ImmerArchives, class T>
-inline void
-CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive<Previous, ImmerArchives>& ar,
-                          cereal::SizeTag<T>& st)
+template <class Previous, class ImmerArchives, class WrapF, class T>
+inline void CEREAL_LOAD_FUNCTION_NAME(
+    json_immer_input_archive<Previous, ImmerArchives, WrapF>& ar,
+    cereal::SizeTag<T>& st)
 {
     ar.loadSize(st.size);
 }
@@ -560,19 +631,19 @@ CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive<Previous, ImmerArchives>& ar,
 namespace cereal {
 namespace traits {
 namespace detail {
-template <class Previous, class ImmerArchives>
+template <class Previous, class ImmerArchives, class WrapF>
 struct get_output_from_input<
-    immer::archive::json_immer_input_archive<Previous, ImmerArchives>>
+    immer::archive::json_immer_input_archive<Previous, ImmerArchives, WrapF>>
 {
-    using type =
-        immer::archive::json_immer_output_archive<Previous, ImmerArchives>;
+    using type = immer::archive::
+        json_immer_output_archive<Previous, ImmerArchives, WrapF>;
 };
-template <class Previous, class ImmerArchives>
+template <class Previous, class ImmerArchives, class WrapF>
 struct get_input_from_output<
-    immer::archive::json_immer_output_archive<Previous, ImmerArchives>>
+    immer::archive::json_immer_output_archive<Previous, ImmerArchives, WrapF>>
 {
-    using type =
-        immer::archive::json_immer_input_archive<Previous, ImmerArchives>;
+    using type = immer::archive::
+        json_immer_input_archive<Previous, ImmerArchives, WrapF>;
 };
 } // namespace detail
 } // namespace traits

@@ -2,7 +2,6 @@
 
 #include <immer/extra/archive/errors.hpp>
 #include <immer/extra/archive/json/json_immer.hpp>
-#include <immer/extra/archive/json/json_immer_auto.hpp>
 #include <immer/extra/archive/json/json_with_archive.hpp>
 #include <immer/extra/archive/traits.hpp>
 
@@ -11,6 +10,12 @@
 #include <boost/core/demangle.hpp>
 
 namespace immer::archive {
+
+template <typename T>
+concept WithOutputArchives = requires(T a) { a.get_output_archives(); };
+
+template <typename T>
+concept WithInputArchives = requires(T a) { a.get_input_archives(); };
 
 namespace detail {
 template <typename, typename = void>
@@ -84,30 +89,16 @@ struct archivable
     // }
 };
 
-template <class Previous, class Storage, class Names, class Container>
-auto save_minimal(
-    const json_immer_output_archive<Previous,
-                                    detail::archives_save<Storage, Names>>& ar,
-    const archivable<Container>& value)
+template <WithOutputArchives Archive, class Container>
+auto save_minimal(const Archive& ar, const archivable<Container>& value)
 {
-    auto& save_archive =
-        const_cast<
-            json_immer_output_archive<Previous,
-                                      detail::archives_save<Storage, Names>>&>(
-            ar)
-            .get_output_archives()
-            .template get_save_archive<Container>();
+    auto& save_archive = const_cast<Archive&>(ar)
+                             .get_output_archives()
+                             .template get_save_archive<Container>();
     auto [archive, id] =
         save_to_archive(value.container, std::move(save_archive));
     save_archive = std::move(archive);
     return id.value;
-}
-
-template <class Archive, class WrapF, class Container>
-auto save_minimal(const json_immer_auto_output_archive<Archive, WrapF>& ar,
-                  const archivable<Container>& value)
-{
-    return save_minimal(ar.previous, value);
 }
 
 // This function must exist because cereal does some checks and it's not
@@ -122,16 +113,15 @@ auto save_minimal(
     throw std::logic_error{"Should never be called"};
 }
 
-template <class Previous, class ImmerArchives, class Container>
+template <WithInputArchives Archive, class Container>
 void load_minimal(
-    const json_immer_input_archive<Previous, ImmerArchives>& ar,
+    const Archive& ar,
     archivable<Container>& value,
     const typename container_traits<Container>::container_id::rep_t& id)
 {
-    auto& loader =
-        const_cast<json_immer_input_archive<Previous, ImmerArchives>&>(ar)
-            .get_input_archives()
-            .template get_loader<Container>();
+    auto& loader = const_cast<Archive&>(ar)
+                       .get_input_archives()
+                       .template get_loader<Container>();
 
     // Have to be specific because for vectors container_id is different from
     // node_id, but for hash-based containers, a container is identified just by
@@ -170,5 +160,33 @@ void load_minimal(
     // This one is actually called while loading with not-yet-fully-loaded
     // archive.
 }
+
+/**
+ * This wrapper is used to load a given container via archivable.
+ */
+template <class Container>
+struct archivable_loader_wrapper
+{
+    Container& value;
+
+    template <class Archive>
+    typename container_traits<Container>::container_id::rep_t
+    save_minimal(const Archive&) const
+    {
+        throw std::logic_error{
+            "Should never be called. archivable_loader_wrapper::save_minimal"};
+    }
+
+    template <class Archive>
+    void load_minimal(
+        const Archive& ar,
+        const typename container_traits<Container>::container_id::rep_t&
+            container_id)
+    {
+        archivable<Container> arch;
+        immer::archive::load_minimal(ar, arch, container_id);
+        value = std::move(arch).container;
+    }
+};
 
 } // namespace immer::archive

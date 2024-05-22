@@ -507,9 +507,10 @@ constexpr bool is_archive_empty()
 }
 
 // Recursively serializes the archives but not calling finalize
-template <class Previous, class Archives, class SaveArchiveF>
-void save_archives_impl(json_immer_output_archive<Previous, Archives>& ar,
-                        const SaveArchiveF& save_archive)
+template <class Previous, class Archives, class WrapF, class SaveArchiveF>
+void save_archives_impl(
+    json_immer_output_archive<Previous, Archives, WrapF>& ar,
+    const SaveArchiveF& save_archive)
 {
     using Names    = typename Archives::names_t;
     using IsUnique = decltype(detail::are_type_names_unique(Names{}));
