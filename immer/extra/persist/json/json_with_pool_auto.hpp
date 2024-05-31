@@ -133,7 +133,8 @@ auto get_pools_for_type(auto type)
 
 template <typename T,
           class PoolsTypes,
-          class WrapF = std::decay_t<decltype(wrap_for_saving)>>
+          class OutputArchive = cereal::JSONOutputArchive,
+          class WrapF         = std::decay_t<decltype(wrap_for_saving)>>
 auto to_json_with_auto_pool(const T& serializable,
                             const PoolsTypes& pools_types,
                             const WrapF& wrap = wrap_for_saving)
@@ -154,9 +155,9 @@ auto to_json_with_auto_pool(const T& serializable,
     {
         auto pools  = detail::generate_output_pools(pools_types);
         using Pools = std::decay_t<decltype(pools)>;
-        auto ar     = json_immer_output_archive<cereal::JSONOutputArchive,
-                                            Pools,
-                                            decltype(wrap)>{pools, wrap, os};
+        auto ar =
+            json_immer_output_archive<OutputArchive, Pools, decltype(wrap)>{
+                pools, wrap, os};
         // value0 because that's now cereal saves the unnamed object by default,
         // maybe change later.
         ar(cereal::make_nvp("value0", serializable));
@@ -200,7 +201,9 @@ auto get_auto_pool(const T& serializable,
     return pools;
 }
 
-template <typename T, class PoolsTypes>
+template <typename T,
+          class PoolsTypes,
+          class Archive = cereal::JSONInputArchive>
 T from_json_with_auto_pool(std::istream& is, const PoolsTypes& pools_types)
 {
     namespace hana      = boost::hana;
@@ -209,12 +212,10 @@ T from_json_with_auto_pool(std::istream& is, const PoolsTypes& pools_types)
     using Pools =
         std::decay_t<decltype(detail::generate_input_pools(pools_types))>;
 
-    auto pools = load_pools<Pools>(is, wrap);
+    auto pools = load_pools<Pools, Archive>(is, wrap);
 
-    auto ar =
-        json_immer_input_archive<cereal::JSONInputArchive,
-                                 Pools,
-                                 decltype(wrap)>{std::move(pools), wrap, is};
+    auto ar = json_immer_input_archive<Archive, Pools, decltype(wrap)>{
+        std::move(pools), wrap, is};
     // value0 because that's now cereal saves the unnamed object by default,
     // maybe change later.
     auto value0 = T{};
@@ -222,12 +223,14 @@ T from_json_with_auto_pool(std::istream& is, const PoolsTypes& pools_types)
     return value0;
 }
 
-template <typename T, class PoolsTypes>
+template <typename T,
+          class PoolsTypes,
+          class Archive = cereal::JSONInputArchive>
 T from_json_with_auto_pool(const std::string& input,
                            const PoolsTypes& pools_types)
 {
     auto is = std::istringstream{input};
-    return from_json_with_auto_pool<T>(is, pools_types);
+    return from_json_with_auto_pool<T, PoolsTypes, Archive>(is, pools_types);
 }
 
 } // namespace immer::persist

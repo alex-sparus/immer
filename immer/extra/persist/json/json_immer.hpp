@@ -85,6 +85,16 @@ constexpr bool is_pool_empty()
  * Adapted from cereal/archives/adapters.hpp
  */
 
+template <class T, class = void>
+struct has_set_next_name_t : std::false_type
+{};
+
+template <class T>
+struct has_set_next_name_t<
+    T,
+    std::void_t<decltype(std::declval<T>().setNextName(""))>> : std::true_type
+{};
+
 template <class Previous, class Pools, class WrapF = boost::hana::id_t>
 class json_immer_output_archive
     : public cereal::OutputArchive<
@@ -158,7 +168,10 @@ public:
     friend void CEREAL_SAVE_FUNCTION_NAME(json_immer_output_archive& ar,
                                           cereal::NameValuePair<T> const& t)
     {
-        ar.previous.setNextName(t.name);
+        using has_set_next_name = has_set_next_name_t<Previous>;
+        if constexpr (has_set_next_name::value) {
+            ar.previous.setNextName(t.name);
+        }
         ar(ar.wrap(t.value));
     }
 
@@ -189,8 +202,34 @@ public:
     }
 
     template <class T>
-    friend void CEREAL_SAVE_FUNCTION_NAME(json_immer_output_archive& ar,
-                                          cereal::SizeTag<T> const& v)
+    friend std::enable_if_t<
+        cereal::traits::has_non_member_save<cereal::SizeTag<T>,
+                                            Previous>::value>
+    CEREAL_SAVE_FUNCTION_NAME(json_immer_output_archive& ar,
+                              cereal::SizeTag<T> const& v)
+    {
+        using cereal::CEREAL_SAVE_FUNCTION_NAME;
+        CEREAL_SAVE_FUNCTION_NAME(ar.previous, v);
+    }
+
+    template <class T>
+    friend std::enable_if_t<
+        cereal::traits::has_non_member_serialize<cereal::SizeTag<T>,
+                                                 Previous>::value>
+    CEREAL_SAVE_FUNCTION_NAME(json_immer_output_archive& ar,
+                              cereal::SizeTag<T> const& v)
+    {
+        using cereal::CEREAL_SERIALIZE_FUNCTION_NAME;
+        CEREAL_SERIALIZE_FUNCTION_NAME(ar.previous,
+                                       const_cast<cereal::SizeTag<T>&>(v));
+    }
+
+    template <class T>
+    friend std::enable_if_t<
+        cereal::traits::has_non_member_save<cereal::BinaryData<T>,
+                                            Previous>::value>
+    CEREAL_SAVE_FUNCTION_NAME(json_immer_output_archive& ar,
+                              cereal::BinaryData<T> const& v)
     {
         using cereal::CEREAL_SAVE_FUNCTION_NAME;
         CEREAL_SAVE_FUNCTION_NAME(ar.previous, v);
@@ -292,7 +331,10 @@ public:
     friend void CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive& ar,
                                           cereal::NameValuePair<T>& t)
     {
-        ar.previous.setNextName(t.name);
+        using has_set_next_name = has_set_next_name_t<Previous>;
+        if constexpr (has_set_next_name::value) {
+            ar.previous.setNextName(t.name);
+        }
         auto&& wrapped = ar.wrap(t.value);
         ar(wrapped);
     }
@@ -323,11 +365,25 @@ public:
     }
 
     template <class T>
-    friend void CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive& ar,
-                                          cereal::SizeTag<T>& st)
+    friend std::enable_if_t<
+        cereal::traits::has_non_member_load<cereal::SizeTag<T>,
+                                            Previous>::value>
+    CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive& ar,
+                              cereal::SizeTag<T>& v)
     {
         using cereal::CEREAL_LOAD_FUNCTION_NAME;
-        CEREAL_LOAD_FUNCTION_NAME(ar.previous, st);
+        CEREAL_LOAD_FUNCTION_NAME(ar.previous, v);
+    }
+
+    template <class T>
+    friend std::enable_if_t<
+        cereal::traits::has_non_member_serialize<cereal::SizeTag<T>,
+                                                 Previous>::value>
+    CEREAL_LOAD_FUNCTION_NAME(json_immer_input_archive& ar,
+                              cereal::SizeTag<T>& v)
+    {
+        using cereal::CEREAL_SERIALIZE_FUNCTION_NAME;
+        CEREAL_SERIALIZE_FUNCTION_NAME(ar.previous, v);
     }
 
     bool ignore_pool_exceptions = false;

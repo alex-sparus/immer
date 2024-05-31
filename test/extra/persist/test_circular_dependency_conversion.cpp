@@ -8,7 +8,9 @@
 #include <test/extra/persist/cereal/immer_set.hpp>
 #include <test/extra/persist/cereal/immer_table.hpp>
 
+#include <cereal/archives/portable_binary.hpp>
 #include <cereal/archives/xml.hpp>
+#include <cereal/types/string.hpp>
 
 #define DEFINE_OPERATIONS(name)                                                \
     bool operator==(const name& left, const name& right)                       \
@@ -693,43 +695,58 @@ TEST_CASE("Test circular dependency pools", "[conversion]")
 
     SECTION("XML also works")
     {
-        constexpr auto to_xml =
+        const auto xml_str =
+            to_json_with_auto_pool<decltype(value),
+                                   decltype(names),
+                                   cereal::XMLOutputArchive>(value, names);
+        const auto loaded_value =
+            from_json_with_auto_pool<model::value_one,
+                                     decltype(names),
+                                     cereal::XMLInputArchive>(xml_str, names);
+        REQUIRE(value == loaded_value);
+    }
+
+    SECTION("Binary also works")
+    {
+        constexpr auto to_bin =
             [](const auto& value0, const auto& names, const auto& wrap) {
-                auto os = std::ostringstream{};
+                auto os = std::ostringstream{std::ios::out | std::ios::binary};
                 {
                     auto pools =
                         immer::persist::detail::generate_output_pools(names);
                     using Pools = std::decay_t<decltype(pools)>;
                     auto ar     = immer::persist::json_immer_output_archive<
-                        cereal::XMLOutputArchive,
+                        cereal::PortableBinaryOutputArchive,
                         Pools,
                         decltype(wrap)>{pools, wrap, os};
                     ar(CEREAL_NVP(value0));
                 }
                 return os.str();
             };
-        constexpr auto from_xml = [](const std::string& str,
+        constexpr auto from_bin = [](const std::string& str,
                                      auto& value0,
                                      const auto& names,
                                      const auto& wrap) {
-            auto is     = std::istringstream{str};
+            auto is = std::istringstream{str, std::ios::in | std::ios::binary};
             using Pools = std::decay_t<
                 decltype(immer::persist::detail::generate_input_pools(names))>;
             auto pools =
-                immer::persist::load_pools<Pools, cereal::XMLInputArchive>(
+                immer::persist::load_pools<Pools,
+                                           cereal::PortableBinaryInputArchive>(
                     is, wrap);
 
             auto ar = immer::persist::json_immer_input_archive<
-                cereal::XMLInputArchive,
+                cereal::PortableBinaryInputArchive,
                 Pools,
                 decltype(wrap)>{std::move(pools), wrap, is};
             ar(CEREAL_NVP(value0));
         };
-        const auto xml_str =
-            to_xml(value, names, immer::persist::wrap_for_saving);
+
+        const auto bin_str =
+            to_bin(value, names, immer::persist::wrap_for_saving);
         auto loaded_value = model::value_one{};
-        from_xml(
-            xml_str, loaded_value, names, immer::persist::wrap_for_loading);
+        from_bin(
+            bin_str, loaded_value, names, immer::persist::wrap_for_loading);
         REQUIRE(value == loaded_value);
     }
 }
