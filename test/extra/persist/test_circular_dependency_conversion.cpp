@@ -715,9 +715,10 @@ TEST_CASE("Test circular dependency pools", "[conversion]")
             auto is     = std::istringstream{str};
             using Pools = std::decay_t<
                 decltype(immer::persist::detail::generate_input_pools(names))>;
-            auto pools =
-                immer::persist::load_pools<Pools, cereal::XMLInputArchive>(
-                    is, wrap);
+            auto pools = immer::persist::load_pools<
+                Pools,
+                cereal::XMLInputArchive,
+                immer::persist::get_demangled_name_fn>(is, wrap);
 
             auto ar = immer::persist::json_immer_input_archive<
                 cereal::XMLInputArchive,

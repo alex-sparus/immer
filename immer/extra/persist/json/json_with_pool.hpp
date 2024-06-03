@@ -62,11 +62,9 @@ auto make_shared_storage_holder(std::shared_ptr<T> ptr)
  * Pools and functions to serialize types that contain persistable data
  * structures.
  */
-template <class Storage, class Names>
+template <class Storage>
 struct output_pools
 {
-    using names_t = Names;
-
     Storage storage_;
 
     // To aling the interface with input_pools
@@ -76,10 +74,12 @@ struct output_pools
     template <class Archive>
     void save(Archive& ar) const
     {
-        constexpr auto keys = hana::keys(names_t{});
-        hana::for_each(keys, [&](auto key) {
-            constexpr auto name = names_t{}[key];
-            ar(cereal::make_nvp(name.c_str(), storage()[key]));
+        using pool_name_fn = typename Archive::pool_name_fn;
+        using keys_t       = decltype(hana::keys(storage()));
+        hana::for_each(keys_t{}, [&](auto key) {
+            using Container  = typename decltype(key)::type;
+            const auto& name = pool_name_fn{}(Container{});
+            ar(cereal::make_nvp(name, storage()[key]));
         });
     }
 
@@ -227,23 +227,16 @@ constexpr auto inject_argument = [](auto arg, auto func) {
     };
 };
 
-template <class StorageF, class Names>
+template <class StorageF>
 class input_pools
 {
 private:
     StorageF storage_;
 
 public:
-    using names_t = Names;
-
     input_pools() = default;
 
     explicit input_pools(StorageF storage)
-        : storage_{std::move(storage)}
-    {
-    }
-
-    input_pools(StorageF storage, Names)
         : storage_{std::move(storage)}
     {
     }
@@ -283,10 +276,12 @@ public:
     template <class Archive>
     void load(Archive& ar)
     {
-        constexpr auto keys = hana::keys(names_t{});
-        hana::for_each(keys, [&](auto key) {
-            constexpr auto name = names_t{}[key];
-            ar(cereal::make_nvp(name.c_str(), storage()[key].pool));
+        using pool_name_fn = typename Archive::pool_name_fn;
+        using keys_t       = decltype(hana::keys(storage()));
+        hana::for_each(keys_t{}, [&](auto key) {
+            using Container  = typename decltype(key)::type;
+            const auto& name = pool_name_fn{}(Container{});
+            ar(cereal::make_nvp(name, storage()[key].pool));
         });
     }
 
@@ -401,7 +396,7 @@ public:
         });
 
         auto holder = make_shared_storage_holder(std::move(shared_storage));
-        return input_pools<decltype(holder), Names>{std::move(holder)};
+        return input_pools<decltype(holder)>{std::move(holder)};
     }
 
     void merge_previous(const input_pools& original)
@@ -428,40 +423,37 @@ public:
     }
 };
 
-inline auto generate_output_pools(auto type_names)
+inline auto generate_output_pools(auto types)
 {
     auto storage =
-        hana::fold_left(type_names, hana::make_map(), [](auto map, auto pair) {
-            using Type = typename decltype(+hana::first(pair))::type;
+        hana::fold_left(types, hana::make_map(), [](auto map, auto type) {
+            using Type = typename decltype(type)::type;
             return hana::insert(
                 map,
                 hana::make_pair(
-                    hana::first(pair),
-                    typename container_traits<Type>::output_pool_t{}));
+                    type, typename container_traits<Type>::output_pool_t{}));
         });
 
     using Storage = decltype(storage);
-    using Names   = decltype(type_names);
-    return output_pools<Storage, Names>{storage};
+    return output_pools<Storage>{storage};
 }
 
-inline auto generate_input_pools(auto type_names)
+inline auto generate_input_pools(auto types)
 {
     auto storage =
-        hana::fold_left(type_names, hana::make_map(), [](auto map, auto pair) {
-            using Type = typename decltype(+hana::first(pair))::type;
-            return hana::insert(
-                map, hana::make_pair(hana::first(pair), input_pool<Type>{}));
+        hana::fold_left(types, hana::make_map(), [](auto map, auto type) {
+            using Type = typename decltype(type)::type;
+            return hana::insert(map, hana::make_pair(type, input_pool<Type>{}));
         });
 
     auto storage_f = detail::make_storage_holder(std::move(storage));
-    return input_pools{std::move(storage_f), type_names};
+    return input_pools{std::move(storage_f)};
 }
 
-template <class Storage, class Names>
-inline auto to_input_pools(const output_pools<Storage, Names>& output_pool)
+template <class Storage>
+inline auto to_input_pools(const output_pools<Storage>& output_pool)
 {
-    auto pool = generate_input_pools(Names{});
+    auto pool = generate_input_pools(boost::hana::keys(output_pool.storage()));
     boost::hana::for_each(boost::hana::keys(pool.storage()), [&](auto key) {
         pool.storage()[key].pool = to_input_pool(output_pool.storage()[key]);
     });
@@ -479,7 +471,7 @@ auto get_pools_types(const T&)
 /**
  * Type T must provide a callable free function get_pools_types(const T&).
  */
-template <typename T>
+template <class T, class PoolNameFn = get_demangled_name_fn>
 auto to_json_with_pool(const T& value0)
 {
     auto os = std::ostringstream{};
@@ -488,32 +480,38 @@ auto to_json_with_pool(const T& value0)
         using Pools = std::decay_t<decltype(pools)>;
         auto ar =
             immer::persist::json_immer_output_archive<cereal::JSONOutputArchive,
-                                                      Pools>{os};
+                                                      Pools,
+                                                      boost::hana::id_t,
+                                                      PoolNameFn>{os};
         ar(CEREAL_NVP(value0));
     }
     return os.str();
 }
 
-template <class Pools, class Archive = cereal::JSONInputArchive>
+template <class Pools, class Archive, class PoolNameFn>
 auto load_pools(std::istream& is, const auto& wrap)
 {
-    const auto reload_pool =
-        [wrap](std::istream& is, Pools pools, bool ignore_pool_exceptions) {
-            auto restore              = immer::util::istream_snapshot{is};
-            const auto original_pools = pools;
-            auto ar = json_immer_input_archive<Archive, Pools, decltype(wrap)>{
-                std::move(pools), wrap, is};
-            ar.ignore_pool_exceptions = ignore_pool_exceptions;
-            /**
-             * NOTE: Critical to clear the pools before loading into it
-             * again. I hit a bug when pools contained a vector and every
-             * load would append to it, instead of replacing the contents.
-             */
-            pools = {};
-            ar(CEREAL_NVP(pools));
-            pools.merge_previous(original_pools);
-            return pools;
-        };
+    const auto reload_pool = [wrap](std::istream& is,
+                                    Pools pools,
+                                    bool ignore_pool_exceptions) {
+        auto restore              = immer::util::istream_snapshot{is};
+        const auto original_pools = pools;
+        auto ar =
+            json_immer_input_archive<Archive,
+                                     Pools,
+                                     decltype(wrap),
+                                     PoolNameFn>{std::move(pools), wrap, is};
+        ar.ignore_pool_exceptions = ignore_pool_exceptions;
+        /**
+         * NOTE: Critical to clear the pools before loading into it
+         * again. I hit a bug when pools contained a vector and every
+         * load would append to it, instead of replacing the contents.
+         */
+        pools = {};
+        ar(CEREAL_NVP(pools));
+        pools.merge_previous(original_pools);
+        return pools;
+    };
 
     auto pools = Pools{};
     if constexpr (detail::is_pool_empty<Pools>()) {
@@ -540,30 +538,31 @@ auto load_pools(std::istream& is, const auto& wrap)
     return pools;
 }
 
-template <typename T>
+template <class T, class PoolNameFn = get_demangled_name_fn>
 T from_json_with_pool(std::istream& is)
 {
-    using Pools = std::decay_t<decltype(detail::generate_input_pools(
+    using Pools   = std::decay_t<decltype(detail::generate_input_pools(
         get_pools_types(std::declval<T>())))>;
-    auto pools  = load_pools<Pools>(is, boost::hana::id);
+    using Archive = cereal::JSONInputArchive;
+    auto pools    = load_pools<Pools, Archive, PoolNameFn>(is, boost::hana::id);
 
-    auto ar =
-        immer::persist::json_immer_input_archive<cereal::JSONInputArchive,
-                                                 Pools>{std::move(pools), is};
+    auto ar = immer::persist::
+        json_immer_input_archive<Archive, Pools, boost::hana::id_t, PoolNameFn>{
+            std::move(pools), is};
     auto value0 = T{};
     ar(CEREAL_NVP(value0));
     return value0;
 }
 
-template <typename T>
+template <class T, class PoolNameFn = get_demangled_name_fn>
 T from_json_with_pool(const std::string& input)
 {
     auto is = std::istringstream{input};
-    return from_json_with_pool<T>(is);
+    return from_json_with_pool<T, PoolNameFn>(is);
 }
 
-template <class Storage, class Names, class Container>
-auto get_container_id(const detail::output_pools<Storage, Names>& pools,
+template <class Storage, class Container>
+auto get_container_id(const detail::output_pools<Storage>& pools,
                       const Container& container)
 {
     const auto& old_pool =
@@ -580,9 +579,9 @@ auto get_container_id(const detail::output_pools<Storage, Names>& pools,
  * Given an output_pools and a map of transformations, produce a new type of
  * load pool with those transformations applied
  */
-template <class Storage, class Names, class ConversionMap>
+template <class Storage, class ConversionMap>
 inline auto
-transform_output_pool(const detail::output_pools<Storage, Names>& old_pools,
+transform_output_pool(const detail::output_pools<Storage>& old_pools,
                       const ConversionMap& conversion_map)
 {
     const auto old_load_pools = to_input_pools(old_pools);
@@ -598,15 +597,10 @@ transform_output_pool(const detail::output_pools<Storage, Names>& old_pools,
  * Given an old save pools and a new (transformed) load pools, effectively
  * convert the given container.
  */
-template <class SaveStorage,
-          class SaveNames,
-          class LoadStorage,
-          class LoadNames,
-          class Container>
-auto convert_container(
-    const detail::output_pools<SaveStorage, SaveNames>& old_save_pools,
-    detail::input_pools<LoadStorage, LoadNames>& new_load_pools,
-    const Container& container)
+template <class SaveStorage, class LoadStorage, class Container>
+auto convert_container(const detail::output_pools<SaveStorage>& old_save_pools,
+                       detail::input_pools<LoadStorage>& new_load_pools,
+                       const Container& container)
 {
     const auto container_id = get_container_id(old_save_pools, container);
     auto& loader =

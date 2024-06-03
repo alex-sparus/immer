@@ -1,5 +1,7 @@
 #pragma once
 
+#include <immer/extra/persist/json/names.hpp>
+
 #include <cereal/archives/json.hpp>
 
 #include <boost/hana.hpp>
@@ -85,16 +87,21 @@ constexpr bool is_pool_empty()
  * Adapted from cereal/archives/adapters.hpp
  */
 
-template <class Previous, class Pools, class WrapF = boost::hana::id_t>
+template <class Previous,
+          class Pools,
+          class WrapFn     = boost::hana::id_t,
+          class PoolNameFn = get_demangled_name_fn>
 class json_immer_output_archive
     : public cereal::OutputArchive<
-          json_immer_output_archive<Previous, Pools, WrapF>>
+          json_immer_output_archive<Previous, Pools, WrapFn, PoolNameFn>>
     , public cereal::traits::TextArchive
 {
 public:
+    using pool_name_fn = PoolNameFn;
+
     template <class... Args>
     explicit json_immer_output_archive(Args&&... args)
-        requires std::is_same_v<WrapF, boost::hana::id_t>
+        requires std::is_same_v<WrapFn, boost::hana::id_t>
         : cereal::OutputArchive<json_immer_output_archive>{this}
         , previous{std::forward<Args>(args)...}
     {
@@ -102,7 +109,7 @@ public:
 
     template <class... Args>
     json_immer_output_archive(Pools pools_, Args&&... args)
-        requires std::is_same_v<WrapF, boost::hana::id_t>
+        requires std::is_same_v<WrapFn, boost::hana::id_t>
         : cereal::OutputArchive<json_immer_output_archive>{this}
         , previous{std::forward<Args>(args)...}
         , pools{std::move(pools_)}
@@ -110,7 +117,7 @@ public:
     }
 
     template <class... Args>
-    json_immer_output_archive(Pools pools_, WrapF wrap_, Args&&... args)
+    json_immer_output_archive(Pools pools_, WrapFn wrap_, Args&&... args)
         : cereal::OutputArchive<json_immer_output_archive>{this}
         , wrap{std::move(wrap_)}
         , previous{std::forward<Args>(args)...}
@@ -197,7 +204,7 @@ public:
     }
 
 private:
-    template <class Previous_, class Pools_, class WrapF_>
+    template <class Previous_, class Pools_, class WrapFn_, class PoolNameFn_>
     friend class json_immer_output_archive;
 
     // Recursively serializes the pools but not calling finalize
@@ -215,11 +222,6 @@ private:
             return std::move(ar).get_output_pools();
         };
 
-        using Names    = typename Pools::names_t;
-        using IsUnique = decltype(detail::are_type_names_unique(Names{}));
-        static_assert(IsUnique::value,
-                      "Pool names for each type must be unique");
-
         auto prev = pools;
         while (true) {
             // Keep saving pools until everything is saved.
@@ -232,22 +234,27 @@ private:
     }
 
 private:
-    WrapF wrap;
+    WrapFn wrap;
     Previous previous;
     Pools pools;
     bool finalized{false};
 };
 
-template <class Previous, class Pools, class WrapF = boost::hana::id_t>
+template <class Previous,
+          class Pools,
+          class WrapFn     = boost::hana::id_t,
+          class PoolNameFn = get_demangled_name_fn>
 class json_immer_input_archive
     : public cereal::InputArchive<
-          json_immer_input_archive<Previous, Pools, WrapF>>
+          json_immer_input_archive<Previous, Pools, WrapFn, PoolNameFn>>
     , public cereal::traits::TextArchive
 {
 public:
+    using pool_name_fn = PoolNameFn;
+
     template <class... Args>
     json_immer_input_archive(Pools pools_, Args&&... args)
-        requires std::is_same_v<WrapF, boost::hana::id_t>
+        requires std::is_same_v<WrapFn, boost::hana::id_t>
         : cereal::InputArchive<json_immer_input_archive>{this}
         , previous{std::forward<Args>(args)...}
         , pools{std::move(pools_)}
@@ -255,7 +262,7 @@ public:
     }
 
     template <class... Args>
-    json_immer_input_archive(Pools pools_, WrapF wrap_, Args&&... args)
+    json_immer_input_archive(Pools pools_, WrapFn wrap_, Args&&... args)
         : cereal::InputArchive<json_immer_input_archive>{this}
         , wrap{std::move(wrap_)}
         , previous{std::forward<Args>(args)...}
@@ -333,7 +340,7 @@ public:
     bool ignore_pool_exceptions = false;
 
 private:
-    WrapF wrap;
+    WrapFn wrap;
     Previous previous;
     Pools pools;
 
@@ -347,19 +354,21 @@ private:
 namespace cereal {
 namespace traits {
 namespace detail {
-template <class Previous, class Pools, class WrapF>
+template <class Previous, class Pools, class WrapFn, class PoolNameFn>
 struct get_output_from_input<
-    immer::persist::json_immer_input_archive<Previous, Pools, WrapF>>
+    immer::persist::
+        json_immer_input_archive<Previous, Pools, WrapFn, PoolNameFn>>
 {
-    using type =
-        immer::persist::json_immer_output_archive<Previous, Pools, WrapF>;
+    using type = immer::persist::
+        json_immer_output_archive<Previous, Pools, WrapFn, PoolNameFn>;
 };
-template <class Previous, class Pools, class WrapF>
+template <class Previous, class Pools, class WrapFn, class PoolNameFn>
 struct get_input_from_output<
-    immer::persist::json_immer_output_archive<Previous, Pools, WrapF>>
+    immer::persist::
+        json_immer_output_archive<Previous, Pools, WrapFn, PoolNameFn>>
 {
-    using type =
-        immer::persist::json_immer_input_archive<Previous, Pools, WrapF>;
+    using type = immer::persist::
+        json_immer_input_archive<Previous, Pools, WrapFn, PoolNameFn>;
 };
 } // namespace detail
 } // namespace traits
