@@ -1,11 +1,37 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 
+#include <immer/extra/cereal/immer_box.hpp>
 #include <immer/extra/persist/detail/box/pool.hpp>
 
 #include "utils.hpp"
 
 using namespace test;
+
+namespace {
+struct box_test
+{
+    immer::box<std::string> name;
+
+    template <class Archive>
+    void serialize(Archive& ar)
+    {
+        ar(CEREAL_NVP(name));
+    }
+};
+} // namespace
+
+TEST_CASE("Saving and loading box without pools")
+{
+    const auto value = box_test{
+        .name = "boxy",
+    };
+    const auto json_str      = to_json(value);
+    const auto expected_json = json_t::parse(R"(
+{}
+        )");
+    REQUIRE(json_t::parse(json_str) == expected_json);
+}
 
 TEST_CASE("Test saving a box")
 {
