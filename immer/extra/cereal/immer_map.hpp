@@ -1,4 +1,14 @@
+//
+// immer: immutable data structures for C++
+// Copyright (C) 2016, 2017, 2018 Juan Pedro Bolivar Puente
+//
+// This software is distributed under the Boost Software License, Version 1.0.
+// See accompanying file LICENSE or copy at http://boost.org/LICENSE_1_0.txt
+//
+
 #pragma once
+
+#include <immer/config.hpp>
 
 #include <cereal/cereal.hpp>
 
@@ -41,7 +51,7 @@ CEREAL_LOAD_FUNCTION_NAME(Archive& ar, immer::map<K, T, H, E, MP, B>& m)
         m       = std::move(m).set(std::move(id), std::move(x));
     }
     if (size != m.size())
-        throw std::runtime_error{"duplicate ids?"};
+        IMMER_THROW(std::runtime_error{"duplicate ids?"});
 }
 
 template <typename Archive,
@@ -79,7 +89,7 @@ CEREAL_LOAD_FUNCTION_NAME(Archive& ar, immer::map<K, T, H, E, MP, B>& m)
         m = std::move(m).set(std::move(k), std::move(x));
     }
     if (size != m.size())
-        throw std::runtime_error{"duplicate ids?"};
+        IMMER_THROW(std::runtime_error{"duplicate ids?"});
 }
 
 template <typename Archive,

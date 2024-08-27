@@ -13,7 +13,11 @@
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
+#include <nlohmann/json.hpp>
+
 namespace test {
+
+using json_t = nlohmann::json;
 
 template <class T>
 using vector_one =
