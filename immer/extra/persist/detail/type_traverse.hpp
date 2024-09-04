@@ -130,27 +130,53 @@ inline auto get_inner_types_map_with_empty_strings(const auto& type)
 {
     namespace hana = boost::hana;
 
+    // Returns a tuple of pairs
     constexpr auto get_for_one_type = [](auto type) {
         using T = typename decltype(type)::type;
         return detail::get_inner_types_t<T>::apply();
     };
 
-    constexpr auto get_for_many = [get_for_one_type](const auto& map) {
-        auto new_pairs = hana::to_tuple(map) | [get_for_one_type](auto pair) {
-            return get_for_one_type(hana::first(pair));
-        };
-
-        return hana::fold_left(
-            hana::to_map(new_pairs), map, detail::insert_conditionally);
+    constexpr auto process_queue = [get_for_one_type](const auto& result,
+                                                      const auto& queue) {
+        if constexpr (decltype(hana::is_empty(queue))::value) {
+            return hana::make_tuple(result, queue);
+        } else {
+            const auto& to_expand = hana::front(queue);
+            const auto new_queue  = hana::drop_front(queue);
+            const auto new_state  = hana::fold_left(
+                get_for_one_type(to_expand),
+                hana::make_tuple(result, new_queue),
+                [](auto state, auto pair) {
+                    auto result   = hana::at_c<0>(state);
+                    auto queue    = hana::at_c<1>(state);
+                    auto new_type = hana::first(pair);
+                    auto new_result =
+                        detail::insert_conditionally(result, pair);
+                    if constexpr (hana::contains(result, new_type)) {
+                        // New type has already been seen before
+                        // Queue is not changing
+                        return hana::make_tuple(new_result, queue);
+                    } else {
+                        // First time we see this type, add it to the queue
+                        return hana::make_tuple(new_result,
+                                                hana::append(queue, new_type));
+                    }
+                });
+            return new_state;
+        }
     };
 
-    constexpr auto can_expand = [get_for_many](const auto& set) {
-        return set != get_for_many(set);
+    constexpr auto can_expand = [](const auto& result, const auto& queue) {
+        return !hana::is_empty(queue);
     };
 
-    auto expanded = hana::while_(
-        can_expand, hana::to_map(get_for_one_type(type)), get_for_many);
-    return expanded;
+    const auto initial_state =
+        hana::make_tuple(hana::make_map(), hana::make_tuple(type));
+
+    auto expanded_state = hana::while_(
+        hana::fuse(can_expand), initial_state, hana::fuse(process_queue));
+
+    return hana::at_c<0>(expanded_state);
 }
 
 } // namespace detail
